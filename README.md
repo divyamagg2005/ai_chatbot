@@ -1,52 +1,93 @@
-# AI FAQ Chatbot
+# 🤖 AI FAQ Chatbot
 
-An intelligent chatbot that can answer questions based on the content of uploaded PDF documents using LangChain, OpenAI's GPT, and document embeddings.
+An intelligent chatbot that can answer questions based on the content of uploaded PDF documents using Google's Gemini model, LangChain, and document embeddings. This application provides a user-friendly interface for interacting with your documents through natural language queries.
 
-## Features
+## ✨ Features
 
-- Upload and process PDF documents
-- Ask questions in natural language
-- Get accurate, context-aware responses
-- View source documents for each answer
-- Conversation history maintained during the session
+- 📄 Upload and process multiple PDF documents
+- 💬 Natural language question answering
+- 🧠 Context-aware responses with conversation memory
+- 🔍 View source documents for each answer
+- ⚡ Fast and efficient document processing
+- 🌟 Modern, responsive UI with typing animation
+- 🔒 Secure API key management
 
-## Prerequisites
+## 🚀 Prerequisites
 
 - Python 3.8 or higher
-- OpenAI API key
+- Google API key with access to Gemini models
+- [Google AI Studio](https://makersuite.google.com/app/apikey) account for API key
 
-## Setup
+## 🛠️ Setup
 
 1. Clone this repository
-2. Install the required packages:
+   ```bash
+   git clone https://github.com/yourusername/ai-faq-chatbot.git
+   cd ai-faq-chatbot
    ```
+
+2. Install the required packages:
+   ```bash
    pip install -r requirements.txt
    ```
-3. Create a `.env` file in the project root and add your OpenAI API key:
-   ```
-   OPENAI_API_KEY=your_api_key_here
-   ```
 
-## Usage
+3. Set up your environment:
+   - Create a `.env` file in the project root
+   - Add your Google API key:
+     ```
+     GOOGLE_API_KEY=your_google_api_key_here
+     ```
+   - Alternatively, you can set up Streamlit secrets (recommended for deployment)
 
-1. Run the Streamlit application:
-   ```
+## 🏃‍♂️ Running the Application
+
+1. Start the Streamlit application:
+   ```bash
    streamlit run app.py
    ```
-2. Open your browser and navigate to the URL shown in the terminal (usually http://localhost:8501)
-3. Upload a PDF document using the sidebar
-4. Once the document is processed, start asking questions about its content
 
-## How It Works
+2. Open your browser and navigate to the URL shown in the terminal (typically http://localhost:8501)
 
-1. The application extracts text from the uploaded PDF
-2. The text is split into manageable chunks
-3. These chunks are converted into vector embeddings using OpenAI's embeddings
-4. When you ask a question, the system finds the most relevant chunks using vector similarity search
-5. The relevant chunks are passed to GPT-3.5-turbo along with your question to generate a contextual answer
+3. Use the sidebar to upload one or more PDF documents
 
-## Note
+4. Once processing is complete, start asking questions about the document content
+
+## 🧠 How It Works
+
+1. **Document Processing**
+   - PDFs are parsed and text is extracted
+   - Text is split into manageable chunks with overlap for context
+   - Chunks are converted to vector embeddings using Google's embedding model
+
+2. **Question Answering**
+   - Your question is converted to an embedding
+   - The system performs a similarity search to find relevant document chunks
+   - The most relevant context is passed to Google's Gemini model
+   - The model generates a natural language response based on the context
+
+3. **Conversation Flow**
+   - The application maintains conversation history for context
+   - Each response includes source document references
+   - The UI provides visual feedback during processing
+
+## 🔧 Technical Stack
+
+- **Framework**: Streamlit
+- **LLM**: Google Gemini 2.5 Flash
+- **Embeddings**: Google's embedding-001
+- **Vector Store**: DocArrayInMemorySearch
+- **Document Processing**: PyPDF2, LangChain
+- **Environment Management**: python-dotenv
+
+## 📝 Notes
 
 - The application processes documents locally in your browser
+- No document data is stored on any server
+- For best results, use well-formatted PDFs with clear text (not scanned images)
+- The application supports multiple document uploads for cross-document queries
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 - No data is stored permanently; all processing happens in memory during your session
 - You'll need an active internet connection to use the OpenAI API

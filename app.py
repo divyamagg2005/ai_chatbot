@@ -19,7 +19,7 @@ def type_text_with_cursor(text: str, delay: float = 0.01):
     <style>
     .typed-text::after {content: "|"; animation: blink 1s infinite;}
     @keyframes blink {0%{opacity:1;}50%{opacity:0;}100%{opacity:1;}}
-    .typed-text {font-family: monospace; white-space: pre-wrap; font-size: 1.05rem;}
+    .typed-text {white-space: pre-wrap;}
     </style>
     """
     # inject style once
