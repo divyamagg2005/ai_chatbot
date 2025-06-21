@@ -12,31 +12,28 @@ import hashlib
 from io import BytesIO
 
 def type_text_with_cursor(text: str, delay: float = 0.01):
-    """Streamlit typing effect with blinking cursor."""
-    container = st.empty()
-    typed = ""
-    style = """
-    <style>
-    .typed-text::after {content: "|"; animation: blink 1s infinite;}
-    @keyframes blink {0%{opacity:1;}50%{opacity:0;}100%{opacity:1;}}
-    .typed-text {white-space: pre-wrap;}
-    </style>
-    """
-    # inject style once
-    st.markdown(style, unsafe_allow_html=True)
+    """Streamlit typing effect with blinking cursor - deployment friendly version."""
+    placeholder = st.empty()
     
-    # Clear container first to prevent overlay issues
-    container.empty()
+    # Split text into words for smoother animation
+    words = text.split(' ')
+    displayed_text = ""
     
-    for ch in text:
-        typed += ch
-        # Use unique key to prevent caching issues in deployment
-        container.markdown(f"<div class='typed-text'>{typed}</div>", unsafe_allow_html=True)
-        time.sleep(delay)
+    for i, word in enumerate(words):
+        if i == 0:
+            displayed_text = word
+        else:
+            displayed_text += " " + word
+        
+        # Show text with cursor
+        with placeholder.container():
+            st.markdown(f"{displayed_text}|")
+        
+        time.sleep(delay * 3)  # Slower word-by-word animation
     
-    # Final display without cursor after typing is complete
-    time.sleep(0.5)  # Brief pause before removing cursor
-    container.markdown(f"<div style='white-space: pre-wrap;'>{text}</div>", unsafe_allow_html=True)
+    # Final display without cursor
+    with placeholder.container():
+        st.markdown(displayed_text)
 
 # --- Load environment variables ---
 load_dotenv()
