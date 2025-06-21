@@ -24,10 +24,19 @@ def type_text_with_cursor(text: str, delay: float = 0.01):
     """
     # inject style once
     st.markdown(style, unsafe_allow_html=True)
+    
+    # Clear container first to prevent overlay issues
+    container.empty()
+    
     for ch in text:
         typed += ch
+        # Use unique key to prevent caching issues in deployment
         container.markdown(f"<div class='typed-text'>{typed}</div>", unsafe_allow_html=True)
         time.sleep(delay)
+    
+    # Final display without cursor after typing is complete
+    time.sleep(0.5)  # Brief pause before removing cursor
+    container.markdown(f"<div style='white-space: pre-wrap;'>{text}</div>", unsafe_allow_html=True)
 
 # --- Load environment variables ---
 load_dotenv()
