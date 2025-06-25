@@ -37,7 +37,11 @@ An intelligent chatbot that can answer questions based on the content of uploade
      ```
      GOOGLE_API_KEY=your_google_api_key_here
      ```
-   - Alternatively, you can set up Streamlit secrets (recommended for deployment)
+   - Alternatively, you can store the key in `/.streamlit/secrets.toml` (recommended for deployment):
+  ```toml
+  [default]
+  GOOGLE_API_KEY="your_google_api_key_here"
+  ```
 
 ## 🏃‍♂️ Running the Application
 
@@ -86,8 +90,23 @@ An intelligent chatbot that can answer questions based on the content of uploade
 - For best results, use well-formatted PDFs with clear text (not scanned images)
 - The application supports multiple document uploads for cross-document queries
 
+## 🚢 Deployment
+
+The project can be deployed to any platform that supports Streamlit (e.g. Streamlit Community Cloud, Hugging Face Spaces, or Docker). A `.devcontainer` configuration is provided for a one-click launch in GitHub Codespaces.
+
+```bash
+# Example – Streamlit Community Cloud
+1. Fork or push this repository to your GitHub account.
+2. Go to https://share.streamlit.io and create a new app pointing to `app.py`.
+3. Add `GOOGLE_API_KEY` to the app secrets.
+4. Click “Deploy”.
+```
+
 ## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 - No data is stored permanently; all processing happens in memory during your session
-- You'll need an active internet connection to use the OpenAI API
+- You'll need an active internet connection to call the Google Generative AI API
+
+
+This is the deployed link. you can go to the link and run and test the application. https://aipdfchatbotsystem.streamlit.app/
