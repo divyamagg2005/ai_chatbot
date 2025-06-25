@@ -109,4 +109,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - You'll need an active internet connection to call the Google Generative AI API
 
 
-This is the deployed link. you can go to the link and run and test the application. https://aipdfchatbotsystem.streamlit.app/
+This is the deployed link. you can go to the link and test the application. https://aipdfchatbotsystem.streamlit.app/
