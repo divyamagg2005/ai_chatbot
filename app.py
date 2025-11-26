@@ -36,16 +36,19 @@ load_dotenv(override=True)
 # Get API key from Streamlit secrets or environment
 def get_google_api_key():
     """Get Google API key from Streamlit secrets or environment variables."""
-    api_key = os.getenv("GOOGLE_API_KEY")
-    if api_key:
-        api_key = api_key.strip()
-        if api_key:
-            return api_key
     try:
-        return st.secrets["GOOGLE_API_KEY"].strip()
+        api_key = st.secrets["GOOGLE_API_KEY"]
+        if api_key:
+            api_key = api_key.strip()
+            if api_key:
+                return api_key
     except (KeyError, FileNotFoundError):
-        st.error("🔑 GOOGLE_API_KEY not found. Please add it to your Streamlit secrets or .env file.")
-        st.stop()
+        pass
+    api_key = os.getenv("GOOGLE_API_KEY", "").strip()
+    if api_key:
+        return api_key
+    st.error("🔑 GOOGLE_API_KEY not found. Please add it to your Streamlit secrets or .env file.")
+    st.stop()
 
 def process_pdf(pdf_file):
     """Extract text from a PDF file."""
