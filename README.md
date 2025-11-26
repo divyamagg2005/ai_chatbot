@@ -94,6 +94,9 @@ An intelligent chatbot that can answer questions based on the content of uploade
 
 The project can be deployed to any platform that supports Streamlit (e.g. Streamlit Community Cloud, Hugging Face Spaces, or Docker). A `.devcontainer` configuration is provided for a one-click launch in GitHub Codespaces.
 
+This is the deployed link. you can go to the link and test the application. https://aipdfchatbotsystem.streamlit.app/
+
+
 ```bash
 # Example – Streamlit Community Cloud
 1. Fork or push this repository to your GitHub account.
@@ -102,11 +105,4 @@ The project can be deployed to any platform that supports Streamlit (e.g. Stream
 4. Click “Deploy”.
 ```
 
-## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-- No data is stored permanently; all processing happens in memory during your session
-- You'll need an active internet connection to call the Google Generative AI API
-
-
-This is the deployed link. you can go to the link and run and test the application. https://aipdfchatbotsystem.streamlit.app/
