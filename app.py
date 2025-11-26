@@ -10,6 +10,7 @@ from langchain.chains import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferMemory
 import hashlib
 from io import BytesIO
+import google.generativeai as genai
 
 def type_text_with_cursor(text: str, delay: float = 0.01):
     """Streamlit typing effect with blinking cursor."""
@@ -30,21 +31,21 @@ def type_text_with_cursor(text: str, delay: float = 0.01):
         time.sleep(delay)
 
 # --- Load environment variables ---
-load_dotenv()
+load_dotenv(override=True)
 
 # Get API key from Streamlit secrets or environment
 def get_google_api_key():
     """Get Google API key from Streamlit secrets or environment variables."""
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if api_key:
+        api_key = api_key.strip()
+        if api_key:
+            return api_key
     try:
-        # Try Streamlit secrets first (for deployment)
-        return st.secrets["GOOGLE_API_KEY"]
+        return st.secrets["GOOGLE_API_KEY"].strip()
     except (KeyError, FileNotFoundError):
-        # Fall back to environment variable (for local development)
-        api_key = os.getenv("GOOGLE_API_KEY")
-        if not api_key:
-            st.error("🔑 GOOGLE_API_KEY not found. Please add it to your Streamlit secrets or .env file.")
-            st.stop()
-        return api_key
+        st.error("🔑 GOOGLE_API_KEY not found. Please add it to your Streamlit secrets or .env file.")
+        st.stop()
 
 def process_pdf(pdf_file):
     """Extract text from a PDF file."""
@@ -80,8 +81,10 @@ def get_vectorstore(text_chunks):
     try:
         # Set the API key for Google Generative AI
         google_api_key = get_google_api_key()
+        os.environ["GOOGLE_API_KEY"] = google_api_key
+        genai.configure(api_key=google_api_key)
         embeddings = GoogleGenerativeAIEmbeddings(
-            model="models/embedding-001",
+            model="models/text-embedding-004",
             google_api_key=google_api_key
         )
         vectorstore = DocArrayInMemorySearch.from_texts(
@@ -100,6 +103,8 @@ def get_conversation_chain(vectorstore):
     
     try:
         google_api_key = get_google_api_key()
+        os.environ["GOOGLE_API_KEY"] = google_api_key
+        genai.configure(api_key=google_api_key)
         llm = ChatGoogleGenerativeAI(
             temperature=0.7, 
             model="gemini-2.5-flash",  # Updated model name
@@ -206,6 +211,27 @@ def main():
         st.markdown("- Upload clear, text-based PDFs")
         st.markdown("- Ask specific questions about the content")
         st.markdown("- Request summaries of sections")
+
+        st.markdown("---")
+        with st.expander("Diagnostics"):
+            if st.button("Run checks", key="diag_btn"):
+                try:
+                    k = get_google_api_key()
+                    st.write(f"Key suffix: {k[-4:]}")
+                    genai.configure(api_key=k)
+                    genai.embed_content(model="models/text-embedding-004", content="ping")
+                    st.success("SDK embed: OK")
+                except Exception as e:
+                    st.error(f"SDK embed error: {e}")
+                try:
+                    test_emb = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", google_api_key=k)
+                    vec = test_emb.embed_query("ping")
+                    st.success(f"LC embed: OK ({len(vec)} dims)")
+                except Exception as e:
+                    st.error(f"LC embed error: {e}")
+            if st.button("Clear cache", key="clear_cache"):
+                st.cache_resource.clear()
+                st.success("Cache cleared. Rerun and upload again.")
 
     # Main chat interface
     st.markdown("### 💬 Chat with your documents")
