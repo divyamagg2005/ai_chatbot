@@ -212,26 +212,7 @@ def main():
         st.markdown("- Ask specific questions about the content")
         st.markdown("- Request summaries of sections")
 
-        st.markdown("---")
-        with st.expander("Diagnostics"):
-            if st.button("Run checks", key="diag_btn"):
-                try:
-                    k = get_google_api_key()
-                    st.write(f"Key suffix: {k[-4:]}")
-                    genai.configure(api_key=k)
-                    genai.embed_content(model="models/text-embedding-004", content="ping")
-                    st.success("SDK embed: OK")
-                except Exception as e:
-                    st.error(f"SDK embed error: {e}")
-                try:
-                    test_emb = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", google_api_key=k)
-                    vec = test_emb.embed_query("ping")
-                    st.success(f"LC embed: OK ({len(vec)} dims)")
-                except Exception as e:
-                    st.error(f"LC embed error: {e}")
-            if st.button("Clear cache", key="clear_cache"):
-                st.cache_resource.clear()
-                st.success("Cache cleared. Rerun and upload again.")
+        
 
     # Main chat interface
     st.markdown("### 💬 Chat with your documents")
