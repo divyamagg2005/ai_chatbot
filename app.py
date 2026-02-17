@@ -1,271 +1,263 @@
 import os
+import hashlib
+import time
+from io import BytesIO
+
 import streamlit as st
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
-import time
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import DocArrayInMemorySearch
-from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
-from langchain.chains import ConversationalRetrievalChain
+from langchain_community.vectorstores import FAISS
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.chains.conversational_retrieval.base import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferMemory
-import hashlib
-from io import BytesIO
-import google.generativeai as genai
+from langchain.prompts import PromptTemplate
+from langchain.embeddings.base import Embeddings
+from google import genai
+from google.genai import types as genai_types
 
-def type_text_with_cursor(text: str, delay: float = 0.01):
-    """Streamlit typing effect with blinking cursor."""
-    container = st.empty()
-    typed = ""
-    style = """
-    <style>
-    .typed-text::after {content: "|"; animation: blink 1s infinite;}
-    @keyframes blink {0%{opacity:1;}50%{opacity:0;}100%{opacity:1;}}
-    .typed-text {white-space: pre-wrap;}
-    </style>
-    """
-    # inject style once
-    st.markdown(style, unsafe_allow_html=True)
-    for ch in text:
-        typed += ch
-        container.markdown(f"<div class='typed-text'>{typed}</div>", unsafe_allow_html=True)
-        time.sleep(delay)
-
-# --- Load environment variables ---
 load_dotenv(override=True)
 
-# Get API key from Streamlit secrets or environment
-def get_google_api_key():
-    """Get Google API key from Streamlit secrets or environment variables."""
-    try:
-        api_key = st.secrets["GOOGLE_API_KEY"]
-        if api_key:
-            api_key = api_key.strip()
-            if api_key:
-                return api_key
-    except (KeyError, FileNotFoundError):
-        pass
-    api_key = os.getenv("GOOGLE_API_KEY", "").strip()
-    if api_key:
-        return api_key
-    st.error("🔑 GOOGLE_API_KEY not found. Please add it to your Streamlit secrets or .env file.")
-    st.stop()
+# ── API key ───────────────────────────────────────────────────────────────────
 
-def process_pdf(pdf_file):
-    """Extract text from a PDF file."""
+def get_google_api_key() -> str:
+    key = ""
     try:
-        pdf_reader = PdfReader(pdf_file)
-        text = ""
-        for page in pdf_reader.pages:
-            text += page.extract_text() or ""
-        return text
+        key = st.secrets.get("GOOGLE_API_KEY", "").strip()
+    except Exception:
+        pass
+    if not key:
+        key = os.getenv("GOOGLE_API_KEY", "").strip()
+    if not key:
+        st.error("🔑 GOOGLE_API_KEY not found. Add it to Streamlit secrets or a .env file.")
+        st.stop()
+    os.environ["GOOGLE_API_KEY"] = key
+    return key
+
+# ── Custom Embeddings class with task_type support ────────────────────────────
+# LangChain's built-in wrapper doesn't distinguish query vs document task types.
+# Using task types significantly improves RAG retrieval accuracy per Google docs.
+
+class GeminiEmbeddings(Embeddings):
+    """
+    Wraps gemini-embedding-001 with correct task types:
+      - RETRIEVAL_DOCUMENT  →  used when indexing PDF chunks
+      - RETRIEVAL_QUERY     →  used when embedding the user's question
+    """
+
+    MODEL = "gemini-embedding-001"
+
+    def __init__(self, api_key: str):
+        self._client = genai.Client(api_key=api_key)
+
+    def _embed(self, texts: list[str], task_type: str) -> list[list[float]]:
+        result = self._client.models.embed_content(
+            model=self.MODEL,
+            contents=texts,
+            config=genai_types.EmbedContentConfig(task_type=task_type),
+        )
+        return [e.values for e in result.embeddings]
+
+    # Called when INDEXING documents
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        # Batch in groups of 100 (safe limit per call)
+        all_embeddings = []
+        batch_size = 100
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i : i + batch_size]
+            all_embeddings.extend(self._embed(batch, "RETRIEVAL_DOCUMENT"))
+        return all_embeddings
+
+    # Called when QUERYING
+    def embed_query(self, text: str) -> list[float]:
+        return self._embed([text], "RETRIEVAL_QUERY")[0]
+
+
+# ── PDF helpers ───────────────────────────────────────────────────────────────
+
+def extract_text_from_pdf(file_like) -> str:
+    try:
+        reader = PdfReader(file_like)
+        return "".join(page.extract_text() or "" for page in reader.pages)
     except Exception as e:
-        st.error(f"Error processing PDF: {str(e)}")
+        st.error(f"Error reading PDF: {e}")
         return ""
 
-def get_text_chunks(text):
-    """Split text into chunks for processing."""
+
+def split_text(text: str) -> list[str]:
     if not text.strip():
         return []
-    
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=800,
-        chunk_overlap=150,
-        length_function=len
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=200,
+        length_function=len,
     )
-    chunks = text_splitter.split_text(text)
-    return chunks
+    return splitter.split_text(text)
 
-def get_vectorstore(text_chunks):
-    """Create a vector store from text chunks."""
-    if not text_chunks:
-        st.error("No text chunks to process.")
-        return None
-    
-    try:
-        # Set the API key for Google Generative AI
-        google_api_key = get_google_api_key()
-        os.environ["GOOGLE_API_KEY"] = google_api_key
-        genai.configure(api_key=google_api_key)
-        embeddings = GoogleGenerativeAIEmbeddings(
-            model="models/gemini-embedding-001",
-            google_api_key=google_api_key
-        )
-        vectorstore = DocArrayInMemorySearch.from_texts(
-            texts=text_chunks, 
-            embedding=embeddings
-        )
-        return vectorstore
-    except Exception as e:
-        st.error(f"Error creating vector store: {str(e)}")
-        return None
 
-def get_conversation_chain(vectorstore):
-    """Create a conversation chain with memory."""
-    if not vectorstore:
-        return None
-    
-    try:
-        google_api_key = get_google_api_key()
-        os.environ["GOOGLE_API_KEY"] = google_api_key
-        genai.configure(api_key=google_api_key)
-        llm = ChatGoogleGenerativeAI(
-            temperature=0.7, 
-            model="gemini-2.5-flash",  # Updated model name
-            google_api_key=google_api_key,
-            convert_system_message_to_human=True
-        )
-        
-        memory = ConversationBufferMemory(
-            memory_key='chat_history',
-            return_messages=True,
-            output_key='answer'
-        )
-        
-        # Use Maximal Marginal Relevance to diversify retrieved chunks
-        retriever = vectorstore.as_retriever(
-            search_type="mmr", 
-            search_kwargs={"k": 6}  # Reduced k for better performance
-        )
+# ── Pipeline (cached by file content hash) ───────────────────────────────────
 
-        from langchain.prompts import PromptTemplate
-        QA_PROMPT = PromptTemplate(
-            template=(
-                "You are an expert tutor. Use the following context to answer the user's question. "
-                "If the user requests a summary, provide a concise yet thorough summary covering all key points.\n\n"
-                "Context:\n{context}\n\nQuestion: {question}\nAnswer:"
-            ),
-            input_variables=["context", "question"],
-        )
+@st.cache_resource(show_spinner="🔄 Indexing documents…")
+def build_chain(file_bytes_tuple: tuple[bytes, ...]):
+    api_key = get_google_api_key()
 
-        conversation_chain = ConversationalRetrievalChain.from_llm(
-            llm=llm,
-            retriever=retriever,
-            memory=memory,
-            return_source_documents=True,
-            combine_docs_chain_kwargs={"prompt": QA_PROMPT}
-        )
-        return conversation_chain
-    except Exception as e:
-        st.error(f"Error creating conversation chain: {str(e)}")
-        return None
+    # 1. Extract + chunk text
+    all_chunks: list[str] = []
+    for raw in file_bytes_tuple:
+        text = extract_text_from_pdf(BytesIO(raw))
+        all_chunks.extend(split_text(text))
 
-# ---------------- Utility helpers ----------------
-@st.cache_resource(show_spinner="🔄 Indexing document(s)...")
-def build_vectorstore(file_bytes_tuple: tuple[bytes, ...]):
-    """Return vector store given raw PDF bytes for multiple files (cached)."""
-    all_chunks = []
-    for b in file_bytes_tuple:
-        raw_text = process_pdf(BytesIO(b))
-        if raw_text.strip():
-            chunks = get_text_chunks(raw_text)
-            all_chunks.extend(chunks)
-    
     if not all_chunks:
-        st.error("No text content found in uploaded PDF(s).")
+        st.error("No readable text found in the uploaded PDF(s).")
         return None
-    
-    return get_vectorstore(all_chunks)
+
+    # 2. Build FAISS index — uses RETRIEVAL_DOCUMENT task type for indexing
+    embeddings = GeminiEmbeddings(api_key=api_key)
+    vectorstore = FAISS.from_texts(all_chunks, embedding=embeddings)
+
+    # 3. LLM — gemini-2.5-flash is the current stable balanced model
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash",
+        temperature=0.4,
+        google_api_key=api_key,
+        convert_system_message_to_human=True,
+    )
+
+    # 4. Memory
+    memory = ConversationBufferMemory(
+        memory_key="chat_history",
+        return_messages=True,
+        output_key="answer",
+    )
+
+    # 5. MMR retriever for diversity across retrieved chunks
+    #    Uses RETRIEVAL_QUERY task type automatically via embed_query()
+    retriever = vectorstore.as_retriever(
+        search_type="mmr",
+        search_kwargs={"k": 5, "fetch_k": 15},
+    )
+
+    # 6. Prompt
+    qa_prompt = PromptTemplate(
+        template=(
+            "You are a helpful and knowledgeable assistant. "
+            "Use the context below to answer the question accurately and concisely. "
+            "If the answer isn't in the context, say so honestly.\n\n"
+            "Context:\n{context}\n\n"
+            "Question: {question}\n\n"
+            "Answer:"
+        ),
+        input_variables=["context", "question"],
+    )
+
+    chain = ConversationalRetrievalChain.from_llm(
+        llm=llm,
+        retriever=retriever,
+        memory=memory,
+        return_source_documents=True,
+        combine_docs_chain_kwargs={"prompt": qa_prompt},
+    )
+    return chain
+
+
+# ── Streaming helper ──────────────────────────────────────────────────────────
+
+def word_stream(text: str, delay: float = 0.018):
+    for word in text.split(" "):
+        yield word + " "
+        time.sleep(delay)
+
+
+# ── Main app ──────────────────────────────────────────────────────────────────
 
 def main():
-    st.set_page_config(
-        page_title="AI FAQ Chatbot", 
-        page_icon="🤖",
-        layout="wide"
-    )
-    
-    st.title("🤖 AI FAQ Chatbot")
-    st.markdown("Upload PDF documents and ask questions about their content.")
-    
-    # Initialize session state
-    if "conversation" not in st.session_state:
-        st.session_state.conversation = None
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    if "file_hash" not in st.session_state:
-        st.session_state.file_hash = None
-    
-    # Sidebar for PDF upload
+    st.set_page_config(page_title="PDF Chat", page_icon="🤖", layout="wide")
+    st.title("🤖 AI PDF Chatbot")
+    st.caption("Upload one or more PDFs and chat with their content.")
+
+    st.session_state.setdefault("chain", None)
+    st.session_state.setdefault("messages", [])
+    st.session_state.setdefault("file_hash", None)
+
+    # ── Sidebar ───────────────────────────────────────────────────────────────
     with st.sidebar:
-        st.subheader("📄 Upload Your Documents")
+        st.subheader("📄 Upload Documents")
         pdf_files = st.file_uploader(
-            "Choose PDF files", 
-            type="pdf", 
+            "Choose PDF file(s)",
+            type="pdf",
             accept_multiple_files=True,
-            help="Upload one or more PDF files to analyze"
+            help="Text-based PDFs work best.",
         )
 
         if pdf_files:
-            with st.spinner("Processing documents..."):
-                file_bytes_list = [f.getvalue() for f in pdf_files]
-                file_hash = hashlib.md5(b''.join(file_bytes_list)).hexdigest()
+            file_bytes = [f.getvalue() for f in pdf_files]
+            file_hash = hashlib.md5(b"".join(file_bytes)).hexdigest()
 
-                if st.session_state.get("file_hash") != file_hash:
-                    vectorstore = build_vectorstore(tuple(file_bytes_list))
-                    if vectorstore:
-                        st.session_state.conversation = get_conversation_chain(vectorstore)
-                        st.session_state.file_hash = file_hash
-                        st.success(f"✅ {len(pdf_files)} document(s) processed successfully!")
-                    else:
-                        st.error("❌ Failed to process documents.")
-        
-        # Add some helpful information
+            if st.session_state.file_hash != file_hash:
+                chain = build_chain(tuple(file_bytes))
+                if chain:
+                    st.session_state.chain = chain
+                    st.session_state.file_hash = file_hash
+                    st.session_state.messages = []
+                    st.success(f"✅ {len(pdf_files)} document(s) ready!")
+                else:
+                    st.error("❌ Failed to process documents.")
+
         st.markdown("---")
+        if st.button("🗑️ Clear chat history"):
+            st.session_state.messages = []
+            if st.session_state.chain:
+                st.session_state.chain.memory.clear()
+            st.rerun()
+
         st.markdown("### 💡 Tips")
-        st.markdown("- Upload clear, text-based PDFs")
-        st.markdown("- Ask specific questions about the content")
-        st.markdown("- Request summaries of sections")
+        st.markdown("- Use text-based (not scanned) PDFs for best results")
+        st.markdown("- Ask specific questions for more precise answers")
+        st.markdown("- Ask for *summaries* or *key points* for an overview")
 
-        
+    # ── Chat area ─────────────────────────────────────────────────────────────
+    st.markdown("### 💬 Chat")
 
-    # Main chat interface
-    st.markdown("### 💬 Chat with your documents")
-    
-    # Display chat messages
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-    
-    # Chat input
-    if prompt := st.chat_input("Ask a question about the document..."):
-        # Add user message to chat
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    if prompt := st.chat_input("Ask a question about your document(s)…"):
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
-        
-        # Check if conversation is ready
-        if st.session_state.conversation is None:
+
+        if st.session_state.chain is None:
             with st.chat_message("assistant"):
-                st.warning("⚠️ Please upload a PDF document first.")
+                st.warning("⚠️ Please upload a PDF first.")
             return
-        
-        # Generate response
+
         with st.chat_message("assistant"):
-            with st.spinner("🤔 Thinking..."):
-                try:
-                    response = st.session_state.conversation({"question": prompt})
-                    answer = response["answer"]
-                    
-                    # Display the answer with typing effect
-                    type_text_with_cursor(answer, delay=0.005)  # Faster typing
-                    
-                    # Display source documents in an expander
-                    if response.get("source_documents"):
-                        with st.expander("📚 View Source Documents", expanded=False):
-                            for i, doc in enumerate(response["source_documents"], 1):
-                                st.markdown(f"**📄 Source {i}:**")
-                                st.text_area(
-                                    f"Content {i}", 
-                                    doc.page_content[:500] + ("..." if len(doc.page_content) > 500 else ""),
-                                    height=100,
-                                    key=f"source_{i}_{len(st.session_state.messages)}"
-                                )
-                    
-                    # Add assistant message to chat history
-                    st.session_state.messages.append({"role": "assistant", "content": answer})
-                    
-                except Exception as e:
-                    st.error(f"❌ An error occurred: {str(e)}")
-                    st.info("Please try rephrasing your question or upload a different document.")
+            try:
+                with st.spinner("🤔 Thinking…"):
+                    result = st.session_state.chain({"question": prompt})
+
+                answer: str = result["answer"]
+                st.write_stream(word_stream(answer))
+
+                source_docs = result.get("source_documents", [])
+                if source_docs:
+                    with st.expander("📚 Source Chunks", expanded=False):
+                        for i, doc in enumerate(source_docs, 1):
+                            preview = doc.page_content[:600]
+                            if len(doc.page_content) > 600:
+                                preview += "…"
+                            st.markdown(f"**Chunk {i}**")
+                            st.text(preview)
+                            if i < len(source_docs):
+                                st.divider()
+
+                st.session_state.messages.append({"role": "assistant", "content": answer})
+
+            except Exception as e:
+                st.error(f"❌ Error: {e}")
+                st.info("Try rephrasing your question or re-uploading the document.")
+
 
 if __name__ == "__main__":
     main()
