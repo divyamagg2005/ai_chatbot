@@ -106,7 +106,7 @@ def split_text(text: str) -> list[str]:
     if not text.strip():
         return []
     return RecursiveCharacterTextSplitter(
-        chunk_size=800, chunk_overlap=100
+        chunk_size=1200, chunk_overlap=150
     ).split_text(text)
 
 
@@ -151,7 +151,7 @@ def build_retriever(file_bytes_tuple: tuple[bytes, ...]):
 
     return vectorstore.as_retriever(
         search_type="mmr",
-        search_kwargs={"k": 5, "fetch_k": 15},
+        search_kwargs={"k": 8, "fetch_k": 25},
     )
 
 
@@ -177,8 +177,16 @@ def run_chain(retriever, llm, question: str, chat_history: list) -> tuple[str, l
     prompt = ChatPromptTemplate.from_messages([
         (
             "system",
-            "You are a helpful assistant. Answer the question using ONLY the context below. "
-            "If the answer is not in the context, say so honestly.\n\nContext:\n{context}",
+            """You are an expert study assistant helping a student understand their PDF documents.
+
+Use the context below to answer the question thoroughly and clearly.
+- Write in clear, natural prose — not bullet points unless the student asks.
+- When asked what a document covers, give a proper topic summary (chapters, concepts, key ideas).
+- Never refer to the context as 'snippets', 'chunk 1', 'provided text', etc. Just answer naturally.
+- If something is genuinely not covered in the context, say so briefly.
+
+Context:
+{context}""",
         ),
         MessagesPlaceholder(variable_name="chat_history"),
         ("human", "{question}"),
