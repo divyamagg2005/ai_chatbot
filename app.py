@@ -9,11 +9,11 @@ from PyPDF2 import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.chains import ConversationalRetrievalChain          # ✅ moved here
-from langchain_community.chat_message_histories import ChatMessageHistory  # ✅ new location
-from langchain.memory import ConversationBufferMemory
-from langchain.prompts import PromptTemplate
-from langchain_core.embeddings import Embeddings                   # ✅ moved to langchain_core
+from langchain_core.embeddings import Embeddings
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from google import genai
 from google.genai import types as genai_types
 
@@ -36,12 +36,14 @@ def get_google_api_key() -> str:
     return key
 
 
-# ── Custom Embeddings with task_type support ──────────────────────────────────
-# Specifying task types improves RAG retrieval accuracy per Google's docs:
-#   RETRIEVAL_DOCUMENT → indexing chunks
-#   RETRIEVAL_QUERY    → embedding the user's question
+# ── Gemini Embeddings with task_type support ──────────────────────────────────
 
 class GeminiEmbeddings(Embeddings):
+    """
+    Uses gemini-embedding-001 with correct task types:
+      RETRIEVAL_DOCUMENT → indexing PDF chunks
+      RETRIEVAL_QUERY    → embedding the user's question
+    """
     MODEL = "gemini-embedding-001"
 
     def __init__(self, api_key: str):
@@ -56,12 +58,10 @@ class GeminiEmbeddings(Embeddings):
         return [e.values for e in result.embeddings]
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        all_embeddings = []
-        for i in range(0, len(texts), 100):          # batch ≤ 100 per call
-            all_embeddings.extend(
-                self._embed(texts[i : i + 100], "RETRIEVAL_DOCUMENT")
-            )
-        return all_embeddings
+        all_emb = []
+        for i in range(0, len(texts), 100):
+            all_emb.extend(self._embed(texts[i : i + 100], "RETRIEVAL_DOCUMENT"))
+        return all_emb
 
     def embed_query(self, text: str) -> list[float]:
         return self._embed([text], "RETRIEVAL_QUERY")[0]
@@ -82,17 +82,16 @@ def split_text(text: str) -> list[str]:
     if not text.strip():
         return []
     return RecursiveCharacterTextSplitter(
-        chunk_size=1000, chunk_overlap=200, length_function=len
+        chunk_size=1000, chunk_overlap=200
     ).split_text(text)
 
 
-# ── Pipeline (cached by file-content hash) ───────────────────────────────────
+# ── Build retriever (cached by file hash) ─────────────────────────────────────
 
 @st.cache_resource(show_spinner="🔄 Indexing documents…")
-def build_chain(file_bytes_tuple: tuple[bytes, ...]):
+def build_retriever(file_bytes_tuple: tuple[bytes, ...]):
     api_key = get_google_api_key()
 
-    # 1. Extract + chunk
     all_chunks: list[str] = []
     for raw in file_bytes_tuple:
         all_chunks.extend(split_text(extract_text_from_pdf(BytesIO(raw))))
@@ -101,50 +100,61 @@ def build_chain(file_bytes_tuple: tuple[bytes, ...]):
         st.error("No readable text found in the uploaded PDF(s).")
         return None
 
-    # 2. FAISS vector store
     vectorstore = FAISS.from_texts(all_chunks, embedding=GeminiEmbeddings(api_key))
+    return vectorstore.as_retriever(
+        search_type="mmr",
+        search_kwargs={"k": 5, "fetch_k": 15},
+    )
 
-    # 3. LLM
-    llm = ChatGoogleGenerativeAI(
+
+def get_llm(api_key: str):
+    return ChatGoogleGenerativeAI(
         model="gemini-2.5-flash",
         temperature=0.4,
         google_api_key=api_key,
         convert_system_message_to_human=True,
     )
 
-    # 4. Memory
-    memory = ConversationBufferMemory(
-        memory_key="chat_history",
-        return_messages=True,
-        output_key="answer",
-    )
 
-    # 5. Retriever
-    retriever = vectorstore.as_retriever(
-        search_type="mmr",
-        search_kwargs={"k": 5, "fetch_k": 15},
-    )
+# ── LCEL chain helpers ────────────────────────────────────────────────────────
 
-    # 6. Prompt
-    qa_prompt = PromptTemplate(
-        template=(
-            "You are a helpful and knowledgeable assistant. "
-            "Use the context below to answer the question accurately and concisely. "
-            "If the answer isn't in the context, say so honestly.\n\n"
-            "Context:\n{context}\n\n"
-            "Question: {question}\n\n"
-            "Answer:"
+def format_docs(docs) -> str:
+    return "\n\n".join(d.page_content for d in docs)
+
+
+def build_prompt():
+    return ChatPromptTemplate.from_messages([
+        (
+            "system",
+            "You are a helpful assistant. Answer the question using ONLY the context below. "
+            "If the answer is not in the context, say so honestly.\n\n"
+            "Context:\n{context}",
         ),
-        input_variables=["context", "question"],
+        MessagesPlaceholder(variable_name="chat_history"),
+        ("human", "{question}"),
+    ])
+
+
+def run_chain(retriever, llm, question: str, chat_history: list) -> tuple[str, list]:
+    """Run one turn of RAG + return (answer, source_docs)."""
+    # Retrieve
+    docs = retriever.invoke(question)
+    context = format_docs(docs)
+
+    # Build and invoke chain
+    chain = (
+        build_prompt()
+        | llm
+        | StrOutputParser()
     )
 
-    return ConversationalRetrievalChain.from_llm(
-        llm=llm,
-        retriever=retriever,
-        memory=memory,
-        return_source_documents=True,
-        combine_docs_chain_kwargs={"prompt": qa_prompt},
-    )
+    answer = chain.invoke({
+        "context": context,
+        "chat_history": chat_history,
+        "question": question,
+    })
+
+    return answer, docs
 
 
 # ── Streaming helper ──────────────────────────────────────────────────────────
@@ -162,9 +172,12 @@ def main():
     st.title("🤖 AI PDF Chatbot")
     st.caption("Upload one or more PDFs and chat with their content.")
 
-    st.session_state.setdefault("chain", None)
-    st.session_state.setdefault("messages", [])
+    st.session_state.setdefault("retriever", None)
+    st.session_state.setdefault("messages", [])        # {"role", "content"}
+    st.session_state.setdefault("chat_history", [])    # LangChain message objects
     st.session_state.setdefault("file_hash", None)
+
+    api_key = get_google_api_key()
 
     # ── Sidebar ───────────────────────────────────────────────────────────────
     with st.sidebar:
@@ -180,11 +193,12 @@ def main():
             file_hash = hashlib.md5(b"".join(file_bytes)).hexdigest()
 
             if st.session_state.file_hash != file_hash:
-                chain = build_chain(tuple(file_bytes))
-                if chain:
-                    st.session_state.chain = chain
+                retriever = build_retriever(tuple(file_bytes))
+                if retriever:
+                    st.session_state.retriever = retriever
                     st.session_state.file_hash = file_hash
                     st.session_state.messages = []
+                    st.session_state.chat_history = []
                     st.success(f"✅ {len(pdf_files)} document(s) ready!")
                 else:
                     st.error("❌ Failed to process documents.")
@@ -192,8 +206,7 @@ def main():
         st.markdown("---")
         if st.button("🗑️ Clear chat history"):
             st.session_state.messages = []
-            if st.session_state.chain:
-                st.session_state.chain.memory.clear()
+            st.session_state.chat_history = []
             st.rerun()
 
         st.markdown("### 💡 Tips")
@@ -213,7 +226,7 @@ def main():
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        if st.session_state.chain is None:
+        if st.session_state.retriever is None:
             with st.chat_message("assistant"):
                 st.warning("⚠️ Please upload a PDF first.")
             return
@@ -221,12 +234,26 @@ def main():
         with st.chat_message("assistant"):
             try:
                 with st.spinner("🤔 Thinking…"):
-                    result = st.session_state.chain({"question": prompt})
+                    llm = get_llm(api_key)
+                    answer, source_docs = run_chain(
+                        st.session_state.retriever,
+                        llm,
+                        prompt,
+                        st.session_state.chat_history,
+                    )
 
-                answer: str = result["answer"]
+                # Stream the answer
                 st.write_stream(word_stream(answer))
 
-                source_docs = result.get("source_documents", [])
+                # Update LangChain message history
+                st.session_state.chat_history.extend([
+                    HumanMessage(content=prompt),
+                    AIMessage(content=answer),
+                ])
+                # Keep history bounded (last 10 turns = 20 messages)
+                st.session_state.chat_history = st.session_state.chat_history[-20:]
+
+                # Source chunks
                 if source_docs:
                     with st.expander("📚 Source Chunks", expanded=False):
                         for i, doc in enumerate(source_docs, 1):
