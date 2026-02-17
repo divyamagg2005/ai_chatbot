@@ -9,10 +9,11 @@ from PyPDF2 import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.chains.conversational_retrieval.base import ConversationalRetrievalChain
+from langchain.chains import ConversationalRetrievalChain          # ✅ moved here
+from langchain_community.chat_message_histories import ChatMessageHistory  # ✅ new location
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
-from langchain.embeddings.base import Embeddings
+from langchain_core.embeddings import Embeddings                   # ✅ moved to langchain_core
 from google import genai
 from google.genai import types as genai_types
 
@@ -34,17 +35,13 @@ def get_google_api_key() -> str:
     os.environ["GOOGLE_API_KEY"] = key
     return key
 
-# ── Custom Embeddings class with task_type support ────────────────────────────
-# LangChain's built-in wrapper doesn't distinguish query vs document task types.
-# Using task types significantly improves RAG retrieval accuracy per Google docs.
+
+# ── Custom Embeddings with task_type support ──────────────────────────────────
+# Specifying task types improves RAG retrieval accuracy per Google's docs:
+#   RETRIEVAL_DOCUMENT → indexing chunks
+#   RETRIEVAL_QUERY    → embedding the user's question
 
 class GeminiEmbeddings(Embeddings):
-    """
-    Wraps gemini-embedding-001 with correct task types:
-      - RETRIEVAL_DOCUMENT  →  used when indexing PDF chunks
-      - RETRIEVAL_QUERY     →  used when embedding the user's question
-    """
-
     MODEL = "gemini-embedding-001"
 
     def __init__(self, api_key: str):
@@ -58,17 +55,14 @@ class GeminiEmbeddings(Embeddings):
         )
         return [e.values for e in result.embeddings]
 
-    # Called when INDEXING documents
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        # Batch in groups of 100 (safe limit per call)
         all_embeddings = []
-        batch_size = 100
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i : i + batch_size]
-            all_embeddings.extend(self._embed(batch, "RETRIEVAL_DOCUMENT"))
+        for i in range(0, len(texts), 100):          # batch ≤ 100 per call
+            all_embeddings.extend(
+                self._embed(texts[i : i + 100], "RETRIEVAL_DOCUMENT")
+            )
         return all_embeddings
 
-    # Called when QUERYING
     def embed_query(self, text: str) -> list[float]:
         return self._embed([text], "RETRIEVAL_QUERY")[0]
 
@@ -87,35 +81,30 @@ def extract_text_from_pdf(file_like) -> str:
 def split_text(text: str) -> list[str]:
     if not text.strip():
         return []
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
-        length_function=len,
-    )
-    return splitter.split_text(text)
+    return RecursiveCharacterTextSplitter(
+        chunk_size=1000, chunk_overlap=200, length_function=len
+    ).split_text(text)
 
 
-# ── Pipeline (cached by file content hash) ───────────────────────────────────
+# ── Pipeline (cached by file-content hash) ───────────────────────────────────
 
 @st.cache_resource(show_spinner="🔄 Indexing documents…")
 def build_chain(file_bytes_tuple: tuple[bytes, ...]):
     api_key = get_google_api_key()
 
-    # 1. Extract + chunk text
+    # 1. Extract + chunk
     all_chunks: list[str] = []
     for raw in file_bytes_tuple:
-        text = extract_text_from_pdf(BytesIO(raw))
-        all_chunks.extend(split_text(text))
+        all_chunks.extend(split_text(extract_text_from_pdf(BytesIO(raw))))
 
     if not all_chunks:
         st.error("No readable text found in the uploaded PDF(s).")
         return None
 
-    # 2. Build FAISS index — uses RETRIEVAL_DOCUMENT task type for indexing
-    embeddings = GeminiEmbeddings(api_key=api_key)
-    vectorstore = FAISS.from_texts(all_chunks, embedding=embeddings)
+    # 2. FAISS vector store
+    vectorstore = FAISS.from_texts(all_chunks, embedding=GeminiEmbeddings(api_key))
 
-    # 3. LLM — gemini-2.5-flash is the current stable balanced model
+    # 3. LLM
     llm = ChatGoogleGenerativeAI(
         model="gemini-2.5-flash",
         temperature=0.4,
@@ -130,8 +119,7 @@ def build_chain(file_bytes_tuple: tuple[bytes, ...]):
         output_key="answer",
     )
 
-    # 5. MMR retriever for diversity across retrieved chunks
-    #    Uses RETRIEVAL_QUERY task type automatically via embed_query()
+    # 5. Retriever
     retriever = vectorstore.as_retriever(
         search_type="mmr",
         search_kwargs={"k": 5, "fetch_k": 15},
@@ -150,14 +138,13 @@ def build_chain(file_bytes_tuple: tuple[bytes, ...]):
         input_variables=["context", "question"],
     )
 
-    chain = ConversationalRetrievalChain.from_llm(
+    return ConversationalRetrievalChain.from_llm(
         llm=llm,
         retriever=retriever,
         memory=memory,
         return_source_documents=True,
         combine_docs_chain_kwargs={"prompt": qa_prompt},
     )
-    return chain
 
 
 # ── Streaming helper ──────────────────────────────────────────────────────────
@@ -183,8 +170,7 @@ def main():
     with st.sidebar:
         st.subheader("📄 Upload Documents")
         pdf_files = st.file_uploader(
-            "Choose PDF file(s)",
-            type="pdf",
+            "Choose PDF file(s)", type="pdf",
             accept_multiple_files=True,
             help="Text-based PDFs work best.",
         )
