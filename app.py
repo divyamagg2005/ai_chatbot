@@ -1,6 +1,7 @@
 import os
 import hashlib
 import time
+import random
 from io import BytesIO
 
 import streamlit as st
@@ -13,9 +14,9 @@ from langchain_core.embeddings import Embeddings
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from google import genai
 from google.genai import types as genai_types
+from google.genai.errors import ClientError
 
 load_dotenv(override=True)
 
@@ -36,35 +37,57 @@ def get_google_api_key() -> str:
     return key
 
 
-# ── Gemini Embeddings with task_type support ──────────────────────────────────
+# ── Gemini Embeddings with rate-limit handling ────────────────────────────────
 
 class GeminiEmbeddings(Embeddings):
     """
-    Uses gemini-embedding-001 with correct task types:
-      RETRIEVAL_DOCUMENT → indexing PDF chunks
-      RETRIEVAL_QUERY    → embedding the user's question
+    gemini-embedding-001 with:
+      - RETRIEVAL_DOCUMENT task type for indexing
+      - RETRIEVAL_QUERY task type for queries
+      - Small batches (20 chunks) + sleep to stay within free-tier TPM
+      - Exponential backoff retry on 429 / ClientError
     """
     MODEL = "gemini-embedding-001"
+    BATCH_SIZE = 20          # small batches → stay under TPM limit
+    BATCH_SLEEP = 1.0        # seconds between batches
+    MAX_RETRIES = 5
 
     def __init__(self, api_key: str):
         self._client = genai.Client(api_key=api_key)
 
-    def _embed(self, texts: list[str], task_type: str) -> list[list[float]]:
-        result = self._client.models.embed_content(
-            model=self.MODEL,
-            contents=texts,
-            config=genai_types.EmbedContentConfig(task_type=task_type),
-        )
-        return [e.values for e in result.embeddings]
+    def _embed_with_retry(self, texts: list[str], task_type: str) -> list[list[float]]:
+        """Single batch embed with exponential backoff on rate-limit errors."""
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                result = self._client.models.embed_content(
+                    model=self.MODEL,
+                    contents=texts,
+                    config=genai_types.EmbedContentConfig(task_type=task_type),
+                )
+                return [e.values for e in result.embeddings]
+            except ClientError as e:
+                # 429 = quota exceeded, 503 = overloaded
+                if "429" in str(e) or "503" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                    wait = (2 ** attempt) + random.uniform(0, 1)
+                    st.toast(f"⏳ Rate limit hit — retrying in {wait:.1f}s…", icon="⚠️")
+                    time.sleep(wait)
+                else:
+                    raise
+        raise RuntimeError(f"Embedding failed after {self.MAX_RETRIES} retries.")
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         all_emb = []
-        for i in range(0, len(texts), 100):
-            all_emb.extend(self._embed(texts[i : i + 100], "RETRIEVAL_DOCUMENT"))
+        total_batches = (len(texts) + self.BATCH_SIZE - 1) // self.BATCH_SIZE
+        for i, start in enumerate(range(0, len(texts), self.BATCH_SIZE)):
+            batch = texts[start : start + self.BATCH_SIZE]
+            all_emb.extend(self._embed_with_retry(batch, "RETRIEVAL_DOCUMENT"))
+            # Sleep between batches to avoid bursting the free-tier TPM
+            if i < total_batches - 1:
+                time.sleep(self.BATCH_SLEEP)
         return all_emb
 
     def embed_query(self, text: str) -> list[float]:
-        return self._embed([text], "RETRIEVAL_QUERY")[0]
+        return self._embed_with_retry([text], "RETRIEVAL_QUERY")[0]
 
 
 # ── PDF helpers ───────────────────────────────────────────────────────────────
@@ -82,13 +105,13 @@ def split_text(text: str) -> list[str]:
     if not text.strip():
         return []
     return RecursiveCharacterTextSplitter(
-        chunk_size=1000, chunk_overlap=200
+        chunk_size=2000, chunk_overlap=300
     ).split_text(text)
 
 
 # ── Build retriever (cached by file hash) ─────────────────────────────────────
 
-@st.cache_resource(show_spinner="🔄 Indexing documents…")
+@st.cache_resource(show_spinner=False)
 def build_retriever(file_bytes_tuple: tuple[bytes, ...]):
     api_key = get_google_api_key()
 
@@ -100,7 +123,31 @@ def build_retriever(file_bytes_tuple: tuple[bytes, ...]):
         st.error("No readable text found in the uploaded PDF(s).")
         return None
 
-    vectorstore = FAISS.from_texts(all_chunks, embedding=GeminiEmbeddings(api_key))
+    total_batches = (len(all_chunks) + GeminiEmbeddings.BATCH_SIZE - 1) // GeminiEmbeddings.BATCH_SIZE
+    est_seconds = total_batches * GeminiEmbeddings.BATCH_SLEEP
+    st.info(
+        f"📄 Found **{len(all_chunks)} chunks** across your PDFs. "
+        f"Indexing with rate-limit pacing (~{est_seconds:.0f}s)…"
+    )
+
+    progress = st.progress(0, text="Embedding chunks…")
+
+    class ProgressEmbeddings(GeminiEmbeddings):
+        def embed_documents(self, texts):
+            all_emb = []
+            total = (len(texts) + self.BATCH_SIZE - 1) // self.BATCH_SIZE
+            for i, start in enumerate(range(0, len(texts), self.BATCH_SIZE)):
+                batch = texts[start : start + self.BATCH_SIZE]
+                all_emb.extend(self._embed_with_retry(batch, "RETRIEVAL_DOCUMENT"))
+                pct = int((i + 1) / total * 100)
+                progress.progress(pct, text=f"Embedding… batch {i+1}/{total}")
+                if i < total - 1:
+                    time.sleep(self.BATCH_SLEEP)
+            progress.empty()
+            return all_emb
+
+    vectorstore = FAISS.from_texts(all_chunks, embedding=ProgressEmbeddings(api_key))
+
     return vectorstore.as_retriever(
         search_type="mmr",
         search_kwargs={"k": 5, "fetch_k": 15},
@@ -116,44 +163,32 @@ def get_llm(api_key: str):
     )
 
 
-# ── LCEL chain helpers ────────────────────────────────────────────────────────
+# ── LCEL chain ────────────────────────────────────────────────────────────────
 
 def format_docs(docs) -> str:
     return "\n\n".join(d.page_content for d in docs)
 
 
-def build_prompt():
-    return ChatPromptTemplate.from_messages([
+def run_chain(retriever, llm, question: str, chat_history: list) -> tuple[str, list]:
+    docs = retriever.invoke(question)
+    context = format_docs(docs)
+
+    prompt = ChatPromptTemplate.from_messages([
         (
             "system",
             "You are a helpful assistant. Answer the question using ONLY the context below. "
-            "If the answer is not in the context, say so honestly.\n\n"
-            "Context:\n{context}",
+            "If the answer is not in the context, say so honestly.\n\nContext:\n{context}",
         ),
         MessagesPlaceholder(variable_name="chat_history"),
         ("human", "{question}"),
     ])
 
-
-def run_chain(retriever, llm, question: str, chat_history: list) -> tuple[str, list]:
-    """Run one turn of RAG + return (answer, source_docs)."""
-    # Retrieve
-    docs = retriever.invoke(question)
-    context = format_docs(docs)
-
-    # Build and invoke chain
-    chain = (
-        build_prompt()
-        | llm
-        | StrOutputParser()
-    )
-
+    chain = prompt | llm | StrOutputParser()
     answer = chain.invoke({
         "context": context,
         "chat_history": chat_history,
         "question": question,
     })
-
     return answer, docs
 
 
@@ -173,8 +208,8 @@ def main():
     st.caption("Upload one or more PDFs and chat with their content.")
 
     st.session_state.setdefault("retriever", None)
-    st.session_state.setdefault("messages", [])        # {"role", "content"}
-    st.session_state.setdefault("chat_history", [])    # LangChain message objects
+    st.session_state.setdefault("messages", [])
+    st.session_state.setdefault("chat_history", [])
     st.session_state.setdefault("file_hash", None)
 
     api_key = get_google_api_key()
@@ -185,7 +220,7 @@ def main():
         pdf_files = st.file_uploader(
             "Choose PDF file(s)", type="pdf",
             accept_multiple_files=True,
-            help="Text-based PDFs work best.",
+            help="Text-based PDFs work best. Large files take longer to index on free tier.",
         )
 
         if pdf_files:
@@ -193,15 +228,16 @@ def main():
             file_hash = hashlib.md5(b"".join(file_bytes)).hexdigest()
 
             if st.session_state.file_hash != file_hash:
-                retriever = build_retriever(tuple(file_bytes))
-                if retriever:
-                    st.session_state.retriever = retriever
-                    st.session_state.file_hash = file_hash
-                    st.session_state.messages = []
-                    st.session_state.chat_history = []
-                    st.success(f"✅ {len(pdf_files)} document(s) ready!")
-                else:
-                    st.error("❌ Failed to process documents.")
+                try:
+                    retriever = build_retriever(tuple(file_bytes))
+                    if retriever:
+                        st.session_state.retriever = retriever
+                        st.session_state.file_hash = file_hash
+                        st.session_state.messages = []
+                        st.session_state.chat_history = []
+                        st.success(f"✅ {len(pdf_files)} document(s) ready!")
+                except Exception as e:
+                    st.error(f"❌ Indexing failed: {e}")
 
         st.markdown("---")
         if st.button("🗑️ Clear chat history"):
@@ -210,9 +246,9 @@ def main():
             st.rerun()
 
         st.markdown("### 💡 Tips")
-        st.markdown("- Use text-based (not scanned) PDFs for best results")
-        st.markdown("- Ask specific questions for more precise answers")
-        st.markdown("- Ask for *summaries* or *key points* for an overview")
+        st.markdown("- Large PDFs take ~1–2 min to index on free tier")
+        st.markdown("- Use text-based (not scanned) PDFs")
+        st.markdown("- Ask specific questions for precise answers")
 
     # ── Chat area ─────────────────────────────────────────────────────────────
     st.markdown("### 💬 Chat")
@@ -242,18 +278,15 @@ def main():
                         st.session_state.chat_history,
                     )
 
-                # Stream the answer
                 st.write_stream(word_stream(answer))
 
-                # Update LangChain message history
+                # Update history, cap at 10 turns
                 st.session_state.chat_history.extend([
                     HumanMessage(content=prompt),
                     AIMessage(content=answer),
                 ])
-                # Keep history bounded (last 10 turns = 20 messages)
                 st.session_state.chat_history = st.session_state.chat_history[-20:]
 
-                # Source chunks
                 if source_docs:
                     with st.expander("📚 Source Chunks", expanded=False):
                         for i, doc in enumerate(source_docs, 1):
