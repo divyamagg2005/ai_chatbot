@@ -48,9 +48,9 @@ class GeminiEmbeddings(Embeddings):
       - Exponential backoff retry on 429 / ClientError
     """
     MODEL = "gemini-embedding-001"
-    BATCH_SIZE = 20          # small batches → stay under TPM limit
-    BATCH_SLEEP = 1.0        # seconds between batches
-    MAX_RETRIES = 5
+    BATCH_SIZE = 10          # 10 chunks × ~200 tokens = ~2,000 tokens/batch
+    BATCH_SLEEP = 4.0        # 4s sleep → stays well under 30,000 TPM free limit
+    MAX_RETRIES = 6
 
     def __init__(self, api_key: str):
         self._client = genai.Client(api_key=api_key)
@@ -68,8 +68,9 @@ class GeminiEmbeddings(Embeddings):
             except ClientError as e:
                 # 429 = quota exceeded, 503 = overloaded
                 if "429" in str(e) or "503" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                    wait = (2 ** attempt) + random.uniform(0, 1)
-                    st.toast(f"⏳ Rate limit hit — retrying in {wait:.1f}s…", icon="⚠️")
+                    # Wait long enough for the TPM window to reset (min 15s)
+                    wait = max(15.0, (2 ** attempt)) + random.uniform(0, 2)
+                    st.toast(f"⏳ Rate limit hit — waiting {wait:.0f}s for quota reset…", icon="⚠️")
                     time.sleep(wait)
                 else:
                     raise
@@ -105,7 +106,7 @@ def split_text(text: str) -> list[str]:
     if not text.strip():
         return []
     return RecursiveCharacterTextSplitter(
-        chunk_size=2000, chunk_overlap=300
+        chunk_size=800, chunk_overlap=100
     ).split_text(text)
 
 
