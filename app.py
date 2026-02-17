@@ -68,8 +68,8 @@ def get_text_chunks(text):
         return []
     
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
+        chunk_size=800,
+        chunk_overlap=150,
         length_function=len
     )
     chunks = text_splitter.split_text(text)
@@ -87,7 +87,7 @@ def get_vectorstore(text_chunks):
         os.environ["GOOGLE_API_KEY"] = google_api_key
         genai.configure(api_key=google_api_key)
         embeddings = GoogleGenerativeAIEmbeddings(
-            model="gemini-embedding-001",
+            model="models/gemini-embedding-001",
             google_api_key=google_api_key
         )
         vectorstore = DocArrayInMemorySearch.from_texts(
@@ -110,7 +110,7 @@ def get_conversation_chain(vectorstore):
         genai.configure(api_key=google_api_key)
         llm = ChatGoogleGenerativeAI(
             temperature=0.7, 
-            model="gemini-3-flash-preview",  # Updated model name
+            model="gemini-2.5-flash",  # Updated model name
             google_api_key=google_api_key,
             convert_system_message_to_human=True
         )
